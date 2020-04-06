@@ -1,9 +1,10 @@
 using System.Collections.Generic;
+using UnityEngine;
 
 public class ObjectPool<T> : Singleton<ObjectPool<T>> where T : Component
 {
     private Queue<T> pool;
-    private Transform poolParent;
+    private Transform parent;
     [SerializeField]
     private T prefabToPool = default;
     [SerializeField]
@@ -21,7 +22,7 @@ public class ObjectPool<T> : Singleton<ObjectPool<T>> where T : Component
         AddParent();
         for (int i = 0; i < poolSize; i++)
         {
-            NewPoolObj();
+            NewPoolObject();
         }
     }
 
@@ -30,28 +31,26 @@ public class ObjectPool<T> : Singleton<ObjectPool<T>> where T : Component
         string parentName = $"{typeof(T).Name} Pool Objects";
         if (GameObject.Find(parentName) == null)
         {
-            poolParent = new GameObject($"{typeof(T).Name} Pool Objects").transform;
-            if (poolParent.transform.parent is null)
-            {
-                DontDestroyOnLoad(poolParent);
-            }
+            parent = new GameObject(parentName).transform;
+            //DontDestroyOnLoad(parent);
         }
     }
 
     /// <summary>
-    /// Get a object from the pool.
+    /// Get an object from the pool.
     /// </summary>
     /// <returns></returns>
     public T Get()
     {
-        CheckObjValidity(pool.Peek());
+        CheckObjectValidity(pool.Peek());
+
         T obj = pool.Dequeue();
         Activate(obj, true);
         return obj;
     }
 
     /// <summary>
-    /// Return a object to the pool.
+    /// Return an object to the pool.
     /// </summary>
     /// <param name="obj"></param>
     public void Return(T obj)
@@ -60,26 +59,26 @@ public class ObjectPool<T> : Singleton<ObjectPool<T>> where T : Component
         pool.Enqueue(obj);
     }
 
-    private void CheckObjValidity(T obj)
+    private void CheckObjectValidity(T obj)
     {
         if (obj is null)
         {
-            NewPoolObj();
+            NewPoolObject();
         }
         else if (obj.gameObject.activeSelf)
         {
-            NewPoolObj();
+            NewPoolObject();
         }
     }
 
-    private void NewPoolObj()
+    private void NewPoolObject()
     {
         T obj = Instantiate(prefabToPool);
         Activate(obj, false);
-        obj.transform.SetParent(poolParent);
+        obj.transform.SetParent(parent);
         pool.Enqueue(obj);
     }
 
-    private void Activate(T obj, bool activate)
-        => obj.gameObject.SetActive(activate);
+    private void Activate(T obj, bool value)
+        => obj.gameObject.SetActive(value);
 }
