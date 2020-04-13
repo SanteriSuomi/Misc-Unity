@@ -3,8 +3,11 @@ using System.IO;
 using System.Runtime.Serialization.Formatters.Binary;
 using System.Xml.Serialization;
 using UnityEngine;
+using System.IO.Compression;
+using CompressionLevel = System.IO.Compression.CompressionLevel;
+using System.Threading.Tasks;
 
-namespace Spellplague.Saving
+namespace Saving
 {
     public enum FileType
     {
@@ -13,7 +16,7 @@ namespace Spellplague.Saving
         XML
     }
 
-    #pragma warning disable IDE0063 // Use simple 'using' statement - breaks code.
+    #pragma warning disable IDE0063, IDE0066 // Use simple 'using' statement - breaks code, Switch expression not supported in C# 7.
     /// <summary>
     /// A generic save system, able save any data to different formats and load them.
     /// </summary>
@@ -21,27 +24,27 @@ namespace Spellplague.Saving
     {
         private enum FileExtension
         {
-            binary,
+            bin,
             json,
             xml
         }
 
         #region Autosaving
-        private static readonly List<ISaveable> saveableObjects = new List<ISaveable>();
+        private static readonly List<ISaveable> saveablesList = new List<ISaveable>();
 
         /// <summary>
         /// Add an object that implements ISaveable to a list that can be iterated over.
         /// </summary>
         /// <param name="saveable"></param>
-        public static void AddSaveable(ISaveable saveable) 
-            => saveableObjects.Add(saveable);
+        public static void AddSaveable(ISaveable saveable)
+            => saveablesList.Add(saveable);
 
         /// <summary>
         /// Call save on all the objects in the saveable list.
         /// </summary>
         public static void SaveSaveables()
         {
-            foreach (ISaveable saveable in saveableObjects)
+            foreach (ISaveable saveable in saveablesList)
             {
                 saveable.Save();
             }
@@ -52,10 +55,42 @@ namespace Spellplague.Saving
         /// </summary>
         public static void LoadSaveables()
         {
-            foreach (ISaveable saveable in saveableObjects)
+            foreach (ISaveable saveable in saveablesList)
             {
                 saveable.Load();
             }
+        }
+        #endregion
+
+        #region Compression
+        /// <summary>
+        /// Compress the save folder in to a .zip file.
+        /// </summary>
+        public static void Compress(CompressionLevel compressionLevel)
+        {
+            if (Directory.Exists(GetSaveDirectoryPath()))
+            {
+                ZipFile.CreateFromDirectory(GetSaveDirectoryPath(), GetZipFilePath(), compressionLevel, false);
+                ClearSaves(); // Remove remaining files because they are now saves in the .zip file.
+                return;
+            }
+
+            LogWarning(GetSaveDirectoryPath());
+        }
+
+        /// <summary>
+        /// Decompress the .zip file in to a new save folder.
+        /// </summary>
+        public static void Decompress()
+        {
+            if (File.Exists(GetZipFilePath()))
+            {
+                ZipFile.ExtractToDirectory(GetZipFilePath(), GetSaveDirectoryPath());
+                File.Delete(GetZipFilePath());
+                return;
+            }
+
+            LogWarning(GetZipFilePath());
         }
         #endregion
 
@@ -68,24 +103,39 @@ namespace Spellplague.Saving
         /// <param name="dataToSave"></param>
         public static void Save<T>(FileType fileType, string toFile, T saveData)
         {
+            CheckDirectory();
+
             switch (fileType)
             {
                 case FileType.Binary:
                     SaveBinary(toFile, saveData);
                     break;
+
                 case FileType.JSON:
                     SaveJSON(toFile, saveData);
                     break;
+
                 case FileType.XML:
                     SaveXML(toFile, saveData);
                     break;
+
+                default:
+                    break;
+            }
+        }
+
+        private static void CheckDirectory()
+        {
+            if (!Directory.Exists(GetSaveDirectoryPath()))
+            {
+                Directory.CreateDirectory(GetSaveDirectoryPath());
             }
         }
 
         private static void SaveBinary<T>(string toFile, T saveData)
         {
             BinaryFormatter binaryFormatter = new BinaryFormatter();
-            using (FileStream fileStream = new FileStream(GetFilePath(toFile, FileExtension.binary),
+            using (FileStream fileStream = new FileStream(GetFilePath(toFile, FileExtension.bin),
                 FileMode.Create))
             {
                 binaryFormatter.Serialize(fileStream, saveData);
@@ -121,10 +171,13 @@ namespace Spellplague.Saving
             {
                 case FileType.Binary:
                     return LoadBinary<T>(fromFile);
+
                 case FileType.JSON:
                     return LoadJSON<T>(fromFile);
+
                 case FileType.XML:
                     return LoadXML<T>(fromFile);
+
                 default:
                     return default;
             }
@@ -132,7 +185,7 @@ namespace Spellplague.Saving
 
         private static T LoadBinary<T>(string fromFile)
         {
-            string file = GetFilePath(fromFile, FileExtension.binary);
+            string file = GetFilePath(fromFile, FileExtension.bin);
             if (File.Exists(file))
             {
                 BinaryFormatter binaryFormatter = new BinaryFormatter();
@@ -142,7 +195,7 @@ namespace Spellplague.Saving
                 }
             }
 
-            Log(file);
+            LogWarning(file);
             return default;
         }
 
@@ -155,7 +208,7 @@ namespace Spellplague.Saving
                 return JsonUtility.FromJson<T>(jsonData);
             }
 
-            Log(file);
+            LogWarning(file);
             return default;
         }
 
@@ -171,7 +224,7 @@ namespace Spellplague.Saving
                 }
             }
 
-            Log(file);
+            LogWarning(file);
             return default;
         }
         #endregion
@@ -187,15 +240,20 @@ namespace Spellplague.Saving
             switch (fileType)
             {
                 case FileType.Binary:
-                    return ExistsCheck(fileToCheck, FileExtension.binary);
+                    return ExistsCheck(fileToCheck, FileExtension.bin);
+
                 case FileType.JSON:
                     return ExistsCheck(fileToCheck, FileExtension.json);
+
+                case FileType.XML:
+                    return ExistsCheck(fileToCheck, FileExtension.xml);
+
                 default:
-                    return false;
+                    return default;
             }
         }
 
-        private static bool ExistsCheck(string fileToCheck, FileExtension extension) 
+        private static bool ExistsCheck(string fileToCheck, FileExtension extension)
             => File.Exists(GetFilePath(fileToCheck, extension));
         #endregion
 
@@ -209,8 +267,9 @@ namespace Spellplague.Saving
             switch (fileType)
             {
                 case FileType.Binary:
-                    DeleteFile(fileToDelete, FileExtension.binary);
+                    DeleteFile(fileToDelete, FileExtension.bin);
                     break;
+
                 case FileType.JSON:
                     DeleteFile(fileToDelete, FileExtension.json);
                     break;
@@ -226,7 +285,7 @@ namespace Spellplague.Saving
                 return;
             }
 
-            Log(file);
+            LogWarning(file);
         }
         #endregion
 
@@ -234,13 +293,14 @@ namespace Spellplague.Saving
         /// <summary>
         /// Delete all saved files from the disk.
         /// </summary>
-        public static void Clear()
+        public static void ClearSaves()
         {
-            foreach (string file in Directory.GetFiles(GetDirectory()))
+            string[] files = Directory.GetFiles(GetSaveDirectoryPath());
+            foreach (string file in files)
             {
-                if (file.Contains(ExtensionString(FileExtension.binary))
-                    || file.Contains(ExtensionString(FileExtension.json))
-                    || file.Contains(ExtensionString(FileExtension.xml)))
+                if (file.Contains(GetExtensionString(FileExtension.bin))
+                    || file.Contains(GetExtensionString(FileExtension.json))
+                    || file.Contains(GetExtensionString(FileExtension.xml)))
                 {
                     File.Delete(file);
                 }
@@ -255,18 +315,19 @@ namespace Spellplague.Saving
         /// <returns></returns>
         public static string[] GetFiles()
         {
-            List<string> files = new List<string>();
-            foreach (string file in Directory.GetFiles(GetDirectory()))
+            List<string> filesToReturn = new List<string>();
+            string[] files = Directory.GetFiles(GetSaveDirectoryPath());
+            foreach (string file in files)
             {
-                if (file.Contains(ExtensionString(FileExtension.binary))
-                    || file.Contains(ExtensionString(FileExtension.json))
-                    || file.Contains(ExtensionString(FileExtension.xml)))
+                if (file.Contains(GetExtensionString(FileExtension.bin))
+                    || file.Contains(GetExtensionString(FileExtension.json))
+                    || file.Contains(GetExtensionString(FileExtension.xml)))
                 {
-                    files.Add(file);
+                    filesToReturn.Add(file);
                 }
             }
 
-            return files.ToArray();
+            return filesToReturn.ToArray();
         }
         #endregion
 
@@ -278,11 +339,12 @@ namespace Spellplague.Saving
         public static int Amount()
         {
             int amount = 0;
-            foreach (string file in Directory.GetFiles(GetDirectory()))
+            string[] files = Directory.GetFiles(GetSaveDirectoryPath());
+            foreach (string file in files)
             {
-                if (file.Contains(ExtensionString(FileExtension.binary))
-                    || file.Contains(ExtensionString(FileExtension.json))
-                    || file.Contains(ExtensionString(FileExtension.xml)))
+                if (file.Contains(GetExtensionString(FileExtension.bin))
+                    || file.Contains(GetExtensionString(FileExtension.json))
+                    || file.Contains(GetExtensionString(FileExtension.xml)))
                 {
                     amount++;
                 }
@@ -294,18 +356,24 @@ namespace Spellplague.Saving
 
         #region Helpers
         private static string GetFilePath(string file, FileExtension extension)
-            => $"{Application.persistentDataPath}/{file}.{extension.ToString()}";
+            => $"{Application.persistentDataPath}/saves/{file}.{extension}";
 
-        private static string GetDirectory() 
+        private static string GetSaveDirectoryPath()
+            => $"{Application.persistentDataPath}/saves/";
+
+        private static string GetZipDirectoryPath()
             => Application.persistentDataPath;
 
-        private static string ExtensionString(FileExtension extension) 
+        private static string GetZipFilePath()
+            => $"{GetZipDirectoryPath()}/saves.zip";
+
+        private static string GetExtensionString(FileExtension extension)
             => extension.ToString();
 
-        private static void Log(string file)
+        private static void LogWarning(string path)
         {
             #if UNITY_EDITOR
-            Debug.LogWarning($"File {file} does not exist!");
+            Debug.LogWarning($"The file or directory {path} does not exist! Ignore if first time saving or loading.");
             #endif
         }
         #endregion
