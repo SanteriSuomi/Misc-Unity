@@ -1,64 +1,168 @@
-﻿using System.Collections.Generic;
+﻿using FullSerializer;
+using MessagePack;
+using System;
+using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
+using System.Runtime.Serialization;
 using System.Runtime.Serialization.Formatters.Binary;
 using System.Xml.Serialization;
 using UnityEngine;
-using System.IO.Compression;
 using CompressionLevel = System.IO.Compression.CompressionLevel;
-using System.Threading.Tasks;
 
-namespace Saving
+namespace Essentials.Saving
 {
     public enum FileType
     {
         Binary,
         JSON,
-        XML
+        XML,
+        MessagePack
     }
 
-    #pragma warning disable IDE0063, IDE0066 // Use simple 'using' statement - breaks code, Switch expression not supported in C# 7.
+    public enum FileExtension
+    {
+        bin,
+        json,
+        xml,
+        dat
+    }
+
+    [Serializable, MessagePackObject]
+    public class AllSaveData<T>
+    {
+        [Key("Saves")]
+        public T[] saves;
+    }
+
     /// <summary>
     /// A generic save system, able save any data to different formats and load them.
     /// </summary>
     public static class SaveSystem
     {
-        private enum FileExtension
+        private static readonly BinaryFormatter binarySerializer = new BinaryFormatter();
+        private static readonly fsSerializer jsonSerializer = new fsSerializer();
+
+        /// <summary>
+        /// Is save currently in progress?
+        /// </summary>
+        public static bool IsSaving { get; private set; }
+
+        /// <summary>
+        /// Is load currently in progress?
+        /// </summary>
+        public static bool IsLoading { get; private set; }
+
+        static SaveSystem()
         {
-            bin,
-            json,
-            xml
+            SurrogateSelector surrogateSelector = new SurrogateSelector();
+            surrogateSelector.AddSurrogate(typeof(Vector2),
+                new StreamingContext(StreamingContextStates.All),
+                new Vector2Surrogate());
+            surrogateSelector.AddSurrogate(typeof(Vector3),
+                new StreamingContext(StreamingContextStates.All),
+                new Vector3Surrogate());
+            surrogateSelector.AddSurrogate(typeof(Quaternion),
+                new StreamingContext(StreamingContextStates.All),
+                new QuaternionSurrogate());
+            binarySerializer.SurrogateSelector = surrogateSelector;
         }
 
         #region Autosaving
         private static readonly List<ISaveable> saveablesList = new List<ISaveable>();
 
         /// <summary>
-        /// Add an object that implements ISaveable to a list that can be iterated over.
+        /// Add an object to the list of objects that will be saved.
         /// </summary>
-        /// <param name="saveable"></param>
-        public static void AddSaveable(ISaveable saveable)
+        /// <param name="saveable">Object that implements the ISaveable interface.</param>
+        public static void Register(ISaveable saveable)
             => saveablesList.Add(saveable);
 
         /// <summary>
-        /// Call save on all the objects in the saveable list.
+        /// Removes an object from the list of objects to be saved.
         /// </summary>
-        public static void SaveSaveables()
+        /// <param name="saveable"></param>
+        public static bool Unregister(ISaveable saveable)
+            => saveablesList.Remove(saveable);
+
+        /// <summary>
+        /// Save all objects that are registered.
+        /// </summary>
+        /// <param name="saveName">Name of the save file.</param>
+        /// <param name="fileType">Type of the save.</param>
+        /// <param name="compressionLevel">Compression applied after saving.</param>
+        public static void SaveAll(string saveName, FileType fileType, CompressionLevel compressionLevel)
         {
-            foreach (ISaveable saveable in saveablesList)
+            IsSaving = true;
+
+            try
             {
-                saveable.Save();
+                SaveData[] allSaves = new SaveData[saveablesList.Count];
+                for (int i = 0; i < saveablesList.Count; i++)
+                {
+                    if (i <= allSaves.GetUpperBound(0))
+                    {
+                        allSaves[i] = saveablesList[i].GetSave();
+                    }
+                    else
+                    {
+                        Debug.LogWarning("There is more objects marked as saveables than there are objects saved on the disk.");
+                        break;
+                    }
+                }
+
+                Save(fileType, saveName, new AllSaveData<SaveData> { saves = allSaves });
+                if (compressionLevel != CompressionLevel.NoCompression)
+                {
+                    Compress(compressionLevel);
+                }
             }
+            catch (Exception e)
+            {
+                Debug.LogWarning(e);
+            }
+
+            IsSaving = false;
         }
 
         /// <summary>
-        /// Call load on all the objects in the saveable list.
+        /// Load all objects that are registered.
         /// </summary>
-        public static void LoadSaveables()
+        /// <param name="saveName">Name of the save file.</param>
+        /// <param name="fileType">Type of the save.</param>
+        /// <param name="decompress">Must be selected if the file was saved with compression.</param>
+        public static void LoadAll(string saveName, FileType fileType, bool decompress)
         {
-            foreach (ISaveable saveable in saveablesList)
+            IsLoading = true;
+
+            try
             {
-                saveable.Load();
+                if (decompress)
+                {
+                    Decompress();
+                }
+
+                AllSaveData<SaveData> allSaveData = Load<AllSaveData<SaveData>>(fileType, saveName);
+                for (int i = 0; i < saveablesList.Count; i++)
+                {
+                    if (i <= allSaveData.saves.GetUpperBound(0)
+                        && saveablesList[i] != null)
+                    {
+                        saveablesList[i].Load(allSaveData.saves[i]);
+                    }
+                    else
+                    {
+                        Debug.LogWarning("There is more objects marked as saveables than there are objects saved on the disk.");
+                        break;
+                    }
+                }
             }
+            catch (Exception e)
+            {
+                Debug.LogWarning(e);
+            }
+
+            IsLoading = false;
         }
         #endregion
 
@@ -66,10 +170,15 @@ namespace Saving
         /// <summary>
         /// Compress the save folder in to a .zip file.
         /// </summary>
-        public static void Compress(CompressionLevel compressionLevel)
+        private static void Compress(CompressionLevel compressionLevel)
         {
             if (Directory.Exists(GetSaveDirectoryPath()))
             {
+                if (File.Exists(GetZipFilePath()))
+                {
+                    File.Delete(GetZipFilePath());
+                }
+
                 ZipFile.CreateFromDirectory(GetSaveDirectoryPath(), GetZipFilePath(), compressionLevel, false);
                 ClearSaves(); // Remove remaining files because they are now saves in the .zip file.
                 return;
@@ -81,7 +190,7 @@ namespace Saving
         /// <summary>
         /// Decompress the .zip file in to a new save folder.
         /// </summary>
-        public static void Decompress()
+        private static void Decompress()
         {
             if (File.Exists(GetZipFilePath()))
             {
@@ -96,15 +205,13 @@ namespace Saving
 
         #region Save
         /// <summary>
-        /// Save data to a file. Please note: use public fields for when serializing, properties are not serializable. 
-        /// XML saving requires the object to have a public parameterless constructor.
+        /// Save data to a file. Please note: use public fields for when serializing, properties are not serializable.
+        /// XML saving requires all objects to have a public constructor, and include that class in the XmlInclude attribute in the base class (SaveData)
         /// </summary>
         /// <param name="toFile"></param>
-        /// <param name="dataToSave"></param>
         public static void Save<T>(FileType fileType, string toFile, T saveData)
         {
-            CheckDirectory();
-
+            ValidateDirectory();
             switch (fileType)
             {
                 case FileType.Binary:
@@ -119,32 +226,25 @@ namespace Saving
                     SaveXML(toFile, saveData);
                     break;
 
-                default:
+                case FileType.MessagePack:
+                    SaveMsgPack(toFile, saveData);
                     break;
-            }
-        }
-
-        private static void CheckDirectory()
-        {
-            if (!Directory.Exists(GetSaveDirectoryPath()))
-            {
-                Directory.CreateDirectory(GetSaveDirectoryPath());
             }
         }
 
         private static void SaveBinary<T>(string toFile, T saveData)
         {
-            BinaryFormatter binaryFormatter = new BinaryFormatter();
             using (FileStream fileStream = new FileStream(GetFilePath(toFile, FileExtension.bin),
                 FileMode.Create))
             {
-                binaryFormatter.Serialize(fileStream, saveData);
+                binarySerializer.Serialize(fileStream, saveData);
             }
         }
 
         private static void SaveJSON<T>(string toFile, T saveData)
         {
-            string jsonData = JsonUtility.ToJson(saveData, true);
+            jsonSerializer.TrySerialize(saveData, out fsData data);
+            string jsonData = fsJsonPrinter.PrettyJson(data);
             File.WriteAllText(GetFilePath(toFile, FileExtension.json), jsonData);
         }
 
@@ -157,6 +257,18 @@ namespace Saving
                 xmlSerializer.Serialize(fileStream, saveData);
             }
         }
+
+        private static void SaveMsgPack<T>(string toFile, T saveData)
+        {
+            var msgPackOptions = MessagePackSerializerOptions.Standard.WithCompression(MessagePackCompression.Lz4BlockArray)
+                .WithResolver(MessagePack.Resolvers.CompositeResolver.Create(MessagePack.Unity.UnityResolver.Instance,
+                                                                             MessagePack.Unity.Extension.UnityBlitResolver.Instance,
+                                                                             MessagePack.Resolvers.StandardResolver.Instance));
+            byte[] msgPackData = MessagePackSerializer.Serialize(saveData, msgPackOptions);
+            //var asd = MessagePackSerializer.Deserialize<AllSaveData<SaveData>>(msgPackData, msgPackOptions);
+            //Debug.Log(asd.saves[0].objName);
+            File.WriteAllBytes(GetFilePath(toFile, FileExtension.dat), msgPackData);
+        }
         #endregion
 
         #region Load
@@ -164,7 +276,6 @@ namespace Saving
         /// Load data from a file.
         /// </summary>
         /// <param name="fromFile"></param>
-        /// <returns></returns>
         public static T Load<T>(FileType fileType, string fromFile)
         {
             switch (fileType)
@@ -178,6 +289,9 @@ namespace Saving
                 case FileType.XML:
                     return LoadXML<T>(fromFile);
 
+                case FileType.MessagePack:
+                    return LoadMsgPack<T>(fromFile);
+
                 default:
                     return default;
             }
@@ -188,10 +302,9 @@ namespace Saving
             string file = GetFilePath(fromFile, FileExtension.bin);
             if (File.Exists(file))
             {
-                BinaryFormatter binaryFormatter = new BinaryFormatter();
                 using (FileStream fileStream = new FileStream(file, FileMode.Open))
                 {
-                    return (T)binaryFormatter.Deserialize(fileStream);
+                    return (T)binarySerializer.Deserialize(fileStream);
                 }
             }
 
@@ -205,7 +318,10 @@ namespace Saving
             if (File.Exists(file))
             {
                 string jsonData = File.ReadAllText(file);
-                return JsonUtility.FromJson<T>(jsonData);
+                fsJsonParser.Parse(jsonData, out fsData data);
+                T instance = default;
+                jsonSerializer.TryDeserialize(data, ref instance);
+                return instance;
             }
 
             LogWarning(file);
@@ -227,6 +343,23 @@ namespace Saving
             LogWarning(file);
             return default;
         }
+
+        private static T LoadMsgPack<T>(string fromFile)
+        {
+            string file = GetFilePath(fromFile, FileExtension.dat);
+            if (File.Exists(file))
+            {
+                var msgPackOptions = MessagePackSerializerOptions.Standard.WithCompression(MessagePackCompression.Lz4BlockArray)
+                    .WithResolver(MessagePack.Resolvers.CompositeResolver.Create(MessagePack.Unity.UnityResolver.Instance,
+                                                                                 MessagePack.Unity.Extension.UnityBlitResolver.Instance,
+                                                                                 MessagePack.Resolvers.StandardResolver.Instance));
+                byte[] msgPackData = File.ReadAllBytes(file);
+                return MessagePackSerializer.Deserialize<T>(msgPackData, msgPackOptions);
+            }
+
+            LogWarning(file);
+            return default;
+        }
         #endregion
 
         #region Exists
@@ -234,7 +367,6 @@ namespace Saving
         /// Check if a certain file exists.
         /// </summary>
         /// <param name="fileToCheck"></param>
-        /// <returns></returns>
         public static bool Exists(FileType fileType, string fileToCheck)
         {
             switch (fileType)
@@ -247,6 +379,9 @@ namespace Saving
 
                 case FileType.XML:
                     return ExistsCheck(fileToCheck, FileExtension.xml);
+
+                case FileType.MessagePack:
+                    return ExistsCheck(fileToCheck, FileExtension.dat);
 
                 default:
                     return default;
@@ -273,6 +408,14 @@ namespace Saving
                 case FileType.JSON:
                     DeleteFile(fileToDelete, FileExtension.json);
                     break;
+
+                case FileType.XML:
+                    DeleteFile(fileToDelete, FileExtension.xml);
+                    break;
+
+                case FileType.MessagePack:
+                    DeleteFile(fileToDelete, FileExtension.dat);
+                    break;
             }
         }
 
@@ -295,12 +438,12 @@ namespace Saving
         /// </summary>
         public static void ClearSaves()
         {
-            string[] files = Directory.GetFiles(GetSaveDirectoryPath());
-            foreach (string file in files)
+            foreach (string file in Directory.GetFiles(GetSaveDirectoryPath()))
             {
                 if (file.Contains(GetExtensionString(FileExtension.bin))
                     || file.Contains(GetExtensionString(FileExtension.json))
-                    || file.Contains(GetExtensionString(FileExtension.xml)))
+                    || file.Contains(GetExtensionString(FileExtension.xml))
+                    || file.Contains(GetExtensionString(FileExtension.dat)))
                 {
                     File.Delete(file);
                 }
@@ -312,16 +455,15 @@ namespace Saving
         /// <summary>
         /// Return all currently saved files.
         /// </summary>
-        /// <returns></returns>
         public static string[] GetFiles()
         {
             List<string> filesToReturn = new List<string>();
-            string[] files = Directory.GetFiles(GetSaveDirectoryPath());
-            foreach (string file in files)
+            foreach (string file in Directory.GetFiles(GetSaveDirectoryPath()))
             {
                 if (file.Contains(GetExtensionString(FileExtension.bin))
                     || file.Contains(GetExtensionString(FileExtension.json))
-                    || file.Contains(GetExtensionString(FileExtension.xml)))
+                    || file.Contains(GetExtensionString(FileExtension.xml))
+                    || file.Contains(GetExtensionString(FileExtension.dat)))
                 {
                     filesToReturn.Add(file);
                 }
@@ -335,16 +477,15 @@ namespace Saving
         /// <summary>
         /// Get the amount of files currently saved.
         /// </summary>
-        /// <returns></returns>
         public static int Amount()
         {
             int amount = 0;
-            string[] files = Directory.GetFiles(GetSaveDirectoryPath());
-            foreach (string file in files)
+            foreach (string file in Directory.GetFiles(GetSaveDirectoryPath()))
             {
                 if (file.Contains(GetExtensionString(FileExtension.bin))
                     || file.Contains(GetExtensionString(FileExtension.json))
-                    || file.Contains(GetExtensionString(FileExtension.xml)))
+                    || file.Contains(GetExtensionString(FileExtension.xml))
+                    || file.Contains(GetExtensionString(FileExtension.dat)))
                 {
                     amount++;
                 }
@@ -354,8 +495,19 @@ namespace Saving
         }
         #endregion
 
-        #region Helpers
-        private static string GetFilePath(string file, FileExtension extension)
+        #region Other Helpers
+        /// <summary>
+        /// Check if the save directory exists, if it doesn't, create one.
+        /// </summary>
+        private static void ValidateDirectory()
+        {
+            if (!Directory.Exists(GetSaveDirectoryPath()))
+            {
+                Directory.CreateDirectory(GetSaveDirectoryPath());
+            }
+        }
+
+        public static string GetFilePath(string file, FileExtension extension)
             => $"{Application.persistentDataPath}/saves/{file}.{extension}";
 
         private static string GetSaveDirectoryPath()
@@ -373,7 +525,7 @@ namespace Saving
         private static void LogWarning(string path)
         {
             #if UNITY_EDITOR
-            Debug.LogWarning($"The file or directory {path} does not exist! Ignore if first time saving or loading.");
+            Debug.LogWarning($"Warning occurred while saving or loading, the file or directory {path} might not exist. Ignore if first time saving or loading.");
             #endif
         }
         #endregion
